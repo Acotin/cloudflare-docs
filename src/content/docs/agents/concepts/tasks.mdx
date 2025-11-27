@@ -1,0 +1,275 @@
+---
+title: Tasks
+pcx_content_type: concept
+sidebar:
+  order: 4
+---
+
+import { TypeScriptExample } from "~/components";
+
+## What are tasks?
+
+Tasks provide lifecycle management for long-running operations in agents. Unlike regular method calls that execute and return immediately, tasks run asynchronously with full progress tracking, real-time event streaming, cancellation support, and persistent state management. This makes tasks ideal for operations like API calls, file processing, AI agent runs, or any asynchronous work that needs progress tracking.
+
+### Understanding tasks in agent systems
+
+Think of tasks like tracking a package delivery. When you place an order, you get a tracking number (task ID) immediately, even though the actual delivery takes time. You can check the status, see progress updates (pending, in transit, delivered), get notifications about key events, and even cancel the shipment if needed. Similarly, agent tasks provide this same level of visibility and control for long-running operations.
+
+### When to use tasks
+
+Tasks are designed for operations that:
+
+- Take more than a few seconds to complete
+- Need progress tracking or real-time updates
+- Should be cancellable by users
+- Require structured event streaming (for example, phases, milestones, status updates)
+- Need persistent state across restarts
+- Benefit from automatic timeout and retry handling
+
+For example, analyzing a repository, processing a large file, generating a comprehensive report, or running a multi-step workflow are all good candidates for tasks.
+
+### Task lifecycle
+
+Tasks automatically transition through well-defined states:
+
+```
+pending → running → completed
+               ↘ failed
+               ↘ aborted
+```
+
+Each state change is persisted to SQLite and broadcast to connected clients in real-time via WebSocket. This ensures that all clients stay synchronized with the current task status.
+
+### Creating tasks
+
+There are two approaches to creating tasks in your agent:
+
+#### 1. Using the `@task()` decorator (recommended)
+
+The `@task()` decorator is the simplest way to create a task. Decorate a method, and it automatically becomes a task when called:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, task, type TaskContext } from "agents";
+
+export class MyAgent extends Agent {
+  @task({ timeout: "5m" })
+  async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
+    // Emit progress events
+    ctx.emit("phase", { name: "cloning" });
+    ctx.setProgress(10);
+
+    const repo = await this.cloneRepo(input.repoUrl);
+
+    // Check for cancellation
+    if (ctx.signal.aborted) throw new Error("Cancelled");
+
+    ctx.emit("phase", { name: "analyzing" });
+    ctx.setProgress(50);
+
+    const results = await this.runAnalysis(repo);
+
+    ctx.setProgress(100);
+    return results; // Stored as task.result
+  }
+}
+```
+
+</TypeScriptExample>
+
+#### 2. Using `this.task()` programmatically
+
+For more control, you can create tasks programmatically from within another method:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, callable } from "agents";
+
+export class MyAgent extends Agent {
+  @callable()
+  async startAnalysis(repoUrl: string) {
+    // Start a task that calls the analyzeRepo method
+    const task = await this.task(
+      "analyzeRepo",
+      { repoUrl },
+      {
+        timeout: "10m",
+        retries: 3
+      }
+    );
+
+    return { taskId: task.id, status: task.status };
+  }
+
+  async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
+    // Task implementation
+  }
+}
+```
+
+</TypeScriptExample>
+
+### TaskContext API
+
+The `ctx` parameter provided to task methods gives you powerful control over the task execution:
+
+| Method                   | Description                                          |
+| ------------------------ | ---------------------------------------------------- |
+| `ctx.emit(type, data)`   | Send a progress event to clients                     |
+| `ctx.setProgress(0-100)` | Update completion percentage                         |
+| `ctx.signal`             | AbortSignal - check `.aborted` or add event listener |
+| `ctx.taskId`             | The unique ID for this task                          |
+
+### Managing tasks
+
+Agents provide a `tasks` property for managing task instances:
+
+<TypeScriptExample>
+
+```ts
+// Get a specific task
+const task = this.tasks.get(taskId);
+
+// List tasks by status
+const running = this.tasks.list({ status: "running" });
+const failed = this.tasks.list({ status: "failed" });
+
+// Cancel a running task
+await this.tasks.cancel(taskId, "User requested cancellation");
+
+// Clean up old tasks
+await this.tasks.cleanup(24 * 60 * 60 * 1000); // Older than 24h
+```
+
+</TypeScriptExample>
+
+### Task options
+
+Configure task behavior with options:
+
+<TypeScriptExample>
+
+```ts
+await this.task("methodName", input, {
+  id: "custom-id", // Optional: provide your own ID
+  timeout: "5m", // Timeout as string ("30s", "5m", "2h")
+  timeout: 300000, // Or milliseconds
+  retries: 3 // Retry on failure (with exponential backoff)
+});
+```
+
+</TypeScriptExample>
+
+### Client-side task tracking
+
+Track task progress in real-time from client applications using the `useTask()` React hook:
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function TaskProgress({ taskId }: { taskId: string }) {
+  const agent = useAgent({ agent: "my-agent" });
+  const task = useTask(agent, taskId, {
+    onEvent: (event) => console.log("Event:", event),
+    onComplete: (result) => console.log("Done:", result),
+    onError: (error) => console.error("Failed:", error)
+  });
+
+  return (
+    <div>
+      <div>Status: {task.status}</div>
+      <progress value={task.progress} max={100} />
+
+      <div>
+        {task.events.map((e) => (
+          <div key={e.id}>
+            [{e.type}] {JSON.stringify(e.data)}
+          </div>
+        ))}
+      </div>
+
+      {task.isRunning && <button onClick={() => task.abort()}>Cancel</button>}
+
+      {task.isCompleted && <div>Result: {JSON.stringify(task.result)}</div>}
+      {task.isError && <div>Error: {task.error}</div>}
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+### Tasks vs workflows
+
+Both tasks and [workflows](/agents/concepts/workflows/) help manage long-running operations, but they serve different purposes:
+
+| Feature    | Tasks (`@task()`)       | Workflows (`workflow()`)     |
+| ---------- | ----------------------- | ---------------------------- |
+| Duration   | Seconds to minutes      | Minutes to days              |
+| Execution  | In Durable Object       | Separate Workflow engine     |
+| Durability | Lost on DO eviction     | Survives restarts            |
+| Retries    | Manual or via options   | Automatic per-step           |
+| Sleep      | Not durable             | Durable (can wait hours)     |
+| Cost       | DO compute time         | Workflow compute time        |
+| Use case   | Quick operations        | Long-running durable processes |
+
+Use tasks for quick operations (under 30 seconds) that run within your agent. Use workflows for operations that need hours or days, require durable sleep, or need per-step automatic retries.
+
+### Best practices
+
+**Emit meaningful events**: Use `ctx.emit()` to send progress updates that help users understand what is happening:
+
+<TypeScriptExample>
+
+```ts
+ctx.emit("phase", { name: "downloading", url: fileUrl });
+ctx.emit("progress", { processed: 50, total: 100 });
+ctx.emit("warning", { message: "Rate limit approaching" });
+```
+
+</TypeScriptExample>
+
+**Check for cancellation**: Regularly check `ctx.signal.aborted` between expensive operations to allow for responsive cancellation:
+
+<TypeScriptExample>
+
+```ts
+for (const file of files) {
+  if (ctx.signal.aborted) throw new Error("Cancelled");
+  await processFile(file);
+}
+```
+
+</TypeScriptExample>
+
+**Update progress accurately**: Set progress to reflect actual completion percentage:
+
+<TypeScriptExample>
+
+```ts
+const total = items.length;
+for (let i = 0; i < total; i++) {
+  await processItem(items[i]);
+  ctx.setProgress(Math.round(((i + 1) / total) * 100));
+}
+```
+
+</TypeScriptExample>
+
+**Handle errors gracefully**: Tasks automatically catch errors and transition to the failed state. Provide meaningful error messages:
+
+<TypeScriptExample>
+
+```ts
+try {
+  await riskyOperation();
+} catch (err) {
+  throw new Error(`Failed to process data: ${err.message}`);
+}
+```
+
+</TypeScriptExample>

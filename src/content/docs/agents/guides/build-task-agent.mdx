@@ -1,0 +1,508 @@
+---
+title: Build a task-based agent
+pcx_content_type: tutorial
+sidebar:
+  order: 10
+---
+
+import { PackageManagers, TypeScriptExample, WranglerConfig } from "~/components";
+
+This guide demonstrates how to build an agent that uses tasks to handle long-running operations with real-time progress tracking. You will create a repository analyzer that fetches and analyzes GitHub repositories, providing live updates to clients.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- Node.js installed (version 18 or later)
+- A Cloudflare account
+- Basic familiarity with TypeScript and React
+
+## 1. Set up your project
+
+Create a new Agents project:
+
+<PackageManagers>
+
+```sh
+npm create cloudflare@latest my-task-agent -- --template cloudflare/agents-starter
+cd my-task-agent
+```
+
+</PackageManagers>
+
+Install additional dependencies for this example:
+
+<PackageManagers>
+
+```sh
+npm install openai
+```
+
+</PackageManagers>
+
+## 2. Configure your agent
+
+Update your `wrangler.jsonc` to include the agent configuration:
+
+<WranglerConfig>
+
+```jsonc
+{
+  "name": "task-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AnalyzerAgent",
+        "class_name": "AnalyzerAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AnalyzerAgent"]
+    }
+  ]
+}
+```
+
+</WranglerConfig>
+
+Create a `.dev.vars` file for your API key:
+
+```ini
+OPENAI_API_KEY=sk-...
+```
+
+## 3. Build the agent
+
+Create `src/agent.ts` with your task-based agent:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, task, callable, type TaskContext } from "agents";
+import OpenAI from "openai";
+
+interface Env {
+  OPENAI_API_KEY: string;
+}
+
+interface AnalysisInput {
+  repoUrl: string;
+  branch?: string;
+}
+
+interface AnalysisResult {
+  repoUrl: string;
+  branch: string;
+  summary: string;
+  fileCount: number;
+  techStack: string[];
+  suggestions: string[];
+}
+
+export class AnalyzerAgent extends Agent<Env> {
+  private openai: OpenAI | null = null;
+
+  private getOpenAI(): OpenAI {
+    if (!this.openai) {
+      this.openai = new OpenAI({
+        apiKey: this.env.OPENAI_API_KEY
+      });
+    }
+    return this.openai;
+  }
+
+  // Task: Analyze a repository
+  @task({ timeout: "5m" })
+  async analyzeRepo(
+    input: AnalysisInput,
+    ctx: TaskContext
+  ): Promise<AnalysisResult> {
+    const { repoUrl, branch = "main" } = input;
+
+    // Parse repository info
+    const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    if (!match) {
+      throw new Error("Invalid GitHub URL");
+    }
+    const [, owner, repo] = match;
+    const repoName = repo.replace(/\.git$/, "");
+
+    // Phase 1: Fetch repository structure
+    ctx.emit("phase", { name: "fetching" });
+    ctx.setProgress(10);
+
+    if (ctx.signal.aborted) throw new Error("Analysis cancelled");
+
+    const files = await this.fetchRepoTree(owner, repoName, branch);
+    ctx.setProgress(30);
+
+    // Phase 2: Read key files
+    ctx.emit("phase", { name: "reading" });
+    const keyFiles = await this.fetchKeyFiles(owner, repoName, branch, files);
+    ctx.setProgress(50);
+
+    if (ctx.signal.aborted) throw new Error("Analysis cancelled");
+
+    // Phase 3: Analyze with AI
+    ctx.emit("phase", { name: "analyzing" });
+    const analysis = await this.analyzeWithAI(repoUrl, files, keyFiles);
+    ctx.setProgress(90);
+
+    // Complete
+    ctx.emit("phase", { name: "complete" });
+    ctx.setProgress(100);
+
+    return {
+      repoUrl,
+      branch,
+      ...analysis,
+      fileCount: files.length
+    };
+  }
+
+  // Callable method to start analysis
+  @callable()
+  async startAnalysis(input: AnalysisInput) {
+    const task = await this.task("analyzeRepo", input);
+    return { taskId: task.id };
+  }
+
+  // Callable method to get task status
+  @callable()
+  async getTask(taskId: string) {
+    return this.tasks.get(taskId);
+  }
+
+  // Callable method to cancel a task
+  @callable()
+  async abortTask(taskId: string) {
+    await this.tasks.cancel(taskId, "User cancelled");
+  }
+
+  // Helper: Fetch repository file tree
+  private async fetchRepoTree(
+    owner: string,
+    repo: string,
+    branch: string
+  ): Promise<Array<{ path: string; type: string }>> {
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "Cloudflare-Agent"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`GitHub API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.tree.map((item: any) => ({
+      path: item.path,
+      type: item.type === "blob" ? "file" : "dir"
+    }));
+  }
+
+  // Helper: Fetch key files for analysis
+  private async fetchKeyFiles(
+    owner: string,
+    repo: string,
+    branch: string,
+    files: Array<{ path: string; type: string }>
+  ): Promise<Record<string, string>> {
+    const keyFileNames = ["README.md", "package.json", "wrangler.toml"];
+    const keyFiles: Record<string, string> = {};
+
+    for (const fileName of keyFileNames) {
+      const file = files.find(
+        (f) => f.path === fileName && f.type === "file"
+      );
+      if (file) {
+        const content = await this.fetchFileContent(owner, repo, branch, file.path);
+        if (content) {
+          keyFiles[fileName] = content;
+        }
+      }
+    }
+
+    return keyFiles;
+  }
+
+  // Helper: Fetch file content from GitHub
+  private async fetchFileContent(
+    owner: string,
+    repo: string,
+    branch: string,
+    path: string
+  ): Promise<string | null> {
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "Cloudflare-Agent"
+        }
+      });
+
+      if (!response.ok) return null;
+
+      const data = await response.json();
+      if (data.content) {
+        return atob(data.content);
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  // Helper: Analyze repository using AI
+  private async analyzeWithAI(
+    repoUrl: string,
+    files: Array<{ path: string; type: string }>,
+    keyFiles: Record<string, string>
+  ) {
+    const fileList = files
+      .filter((f) => f.type === "file")
+      .map((f) => f.path)
+      .slice(0, 100)
+      .join("\n");
+
+    const prompt = `Analyze this GitHub repository: ${repoUrl}
+
+Key files:
+${Object.entries(keyFiles)
+  .map(([name, content]) => `${name}:\n${content.slice(0, 1000)}`)
+  .join("\n\n")}
+
+File structure (sample):
+${fileList}
+
+Provide:
+1. A brief summary of what this repository does
+2. List of technologies used
+3. 2-3 improvement suggestions
+
+Format as JSON: { "summary": "...", "techStack": ["..."], "suggestions": ["..."] }`;
+
+    const response = await this.getOpenAI().chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" }
+    });
+
+    const content = response.choices[0].message.content || "{}";
+    return JSON.parse(content);
+  }
+}
+```
+
+</TypeScriptExample>
+
+## 4. Create the entry point
+
+Create `src/index.ts` to export your agent:
+
+<TypeScriptExample>
+
+```ts
+import { routeAgentRequest } from "agents";
+import { AnalyzerAgent } from "./agent";
+
+export { AnalyzerAgent };
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return routeAgentRequest(request, env);
+  }
+};
+```
+
+</TypeScriptExample>
+
+## 5. Build the React client
+
+Create `src/client/App.tsx` for the user interface:
+
+<TypeScriptExample>
+
+```tsx
+import { useState } from "react";
+import { useAgent } from "agents/react";
+
+interface TaskData {
+  id: string;
+  status: "pending" | "running" | "completed" | "failed" | "aborted";
+  progress?: number;
+  result?: any;
+  error?: string;
+  events?: Array<{ id: string; type: string; data?: any }>;
+}
+
+export function App() {
+  const [tasks, setTasks] = useState<Map<string, TaskData>>(new Map());
+  const [repoUrl, setRepoUrl] = useState("https://github.com/cloudflare/workers-sdk");
+
+  const agent = useAgent({
+    agent: "AnalyzerAgent",
+    name: "default",
+    onMessage: (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "CF_AGENT_TASK_UPDATE") {
+          const { taskId, task } = data;
+          setTasks((prev) => {
+            const next = new Map(prev);
+            if (task === null) {
+              next.delete(taskId);
+            } else {
+              next.set(taskId, task);
+            }
+            return next;
+          });
+        }
+      } catch {
+        // Ignore non-JSON messages
+      }
+    }
+  });
+
+  const startAnalysis = async () => {
+    const result = await agent.call("startAnalysis", [{ repoUrl }]);
+    const taskId = result.taskId;
+
+    setTasks((prev) => {
+      const next = new Map(prev);
+      next.set(taskId, { id: taskId, status: "pending" });
+      return next;
+    });
+  };
+
+  const abortTask = async (taskId: string) => {
+    await agent.call("abortTask", [taskId]);
+  };
+
+  const taskList = Array.from(tasks.values());
+
+  return (
+    <div style={{ maxWidth: "800px", margin: "0 auto", padding: "2rem" }}>
+      <h1>Repository Analyzer</h1>
+
+      <div style={{ marginBottom: "2rem" }}>
+        <label>
+          Repository URL:
+          <input
+            type="text"
+            value={repoUrl}
+            onChange={(e) => setRepoUrl(e.target.value)}
+            style={{ width: "100%", padding: "0.5rem", marginTop: "0.5rem" }}
+          />
+        </label>
+        <button
+          onClick={startAnalysis}
+          style={{ marginTop: "1rem", padding: "0.5rem 1rem" }}
+        >
+          Analyze Repository
+        </button>
+      </div>
+
+      <h2>Tasks</h2>
+      {taskList.length === 0 ? (
+        <p>No tasks yet</p>
+      ) : (
+        <div>
+          {taskList.map((task) => (
+            <div
+              key={task.id}
+              style={{
+                border: "1px solid #ccc",
+                padding: "1rem",
+                marginBottom: "1rem"
+              }}
+            >
+              <div>
+                <strong>Status:</strong> {task.status}
+              </div>
+              {task.progress !== undefined && (
+                <div>
+                  <strong>Progress:</strong> {task.progress}%
+                  <progress value={task.progress} max={100} />
+                </div>
+              )}
+              {task.events && task.events.length > 0 && (
+                <div>
+                  <strong>Events:</strong>
+                  {task.events.slice(-3).map((e) => (
+                    <div key={e.id}>
+                      [{e.type}] {JSON.stringify(e.data)}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {task.status === "completed" && task.result && (
+                <div>
+                  <strong>Result:</strong>
+                  <pre>{JSON.stringify(task.result, null, 2)}</pre>
+                </div>
+              )}
+              {task.status === "failed" && task.error && (
+                <div style={{ color: "red" }}>
+                  <strong>Error:</strong> {task.error}
+                </div>
+              )}
+              {(task.status === "pending" || task.status === "running") && (
+                <button onClick={() => abortTask(task.id)}>Cancel</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+## 6. Test your agent
+
+Start the development server:
+
+<PackageManagers>
+
+```sh
+npm run dev
+```
+
+</PackageManagers>
+
+Open your browser and navigate to the local development URL. Enter a GitHub repository URL and click "Analyze Repository". You should see:
+
+1. Task status updates in real-time
+2. Progress percentage increasing
+3. Phase events showing current activity
+4. Final results when analysis completes
+
+## Key concepts
+
+**Task lifecycle**: Tasks transition through states automatically (`pending` → `running` → `completed/failed/aborted`). Each state change is persisted and broadcast to clients.
+
+**Progress tracking**: Use `ctx.setProgress()` to update completion percentage and `ctx.emit()` to send custom events with detailed status information.
+
+**Cancellation**: Check `ctx.signal.aborted` between expensive operations to handle user-initiated cancellations gracefully.
+
+**Client updates**: Tasks broadcast updates via WebSocket, so all connected clients receive real-time progress without polling.
+
+## Next steps
+
+- Add more analysis features (code quality checks, security scans)
+- Implement task result caching
+- Add authentication to restrict access
+- Deploy to production using `wrangler deploy`
+- Explore [workflows](/agents/concepts/workflows/) for longer-running operations

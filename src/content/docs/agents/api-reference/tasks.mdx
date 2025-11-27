@@ -1,0 +1,471 @@
+---
+title: Tasks API
+pcx_content_type: reference
+sidebar:
+  order: 11
+---
+
+import { TypeScriptExample } from "~/components";
+
+The Tasks API provides methods for creating and managing long-running operations in agents with full lifecycle tracking, progress updates, and cancellation support.
+
+## Create a task
+
+### Using the `@task()` decorator
+
+The `@task()` decorator is the recommended way to define tasks. It automatically handles task registration, lifecycle management, and state persistence.
+
+<TypeScriptExample>
+
+```ts
+import { Agent, task, type TaskContext } from "agents";
+
+export class MyAgent extends Agent {
+  @task({ timeout: "5m" })
+  async processData(
+    input: { dataUrl: string },
+    ctx: TaskContext
+  ): Promise<ResultType> {
+    ctx.emit("started", { url: input.dataUrl });
+    ctx.setProgress(10);
+
+    // Your task logic here
+    const result = await this.process(input.dataUrl);
+
+    ctx.setProgress(100);
+    return result;
+  }
+}
+```
+
+</TypeScriptExample>
+
+#### Task decorator options
+
+| Option    | Type                | Description                                    |
+| --------- | ------------------- | ---------------------------------------------- |
+| `timeout` | `string \| number`  | Task timeout ("30s", "5m", "2h" or milliseconds) |
+| `retries` | `number`            | Number of retry attempts on failure            |
+
+### Using `this.task()`
+
+Programmatically create tasks from within agent methods:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, callable } from "agents";
+
+export class MyAgent extends Agent {
+  @callable()
+  async startProcessing(dataUrl: string) {
+    const taskHandle = await this.task(
+      "processData",
+      { dataUrl },
+      {
+        id: "custom-id", // Optional custom task ID
+        timeout: "10m",
+        retries: 3
+      }
+    );
+
+    return { taskId: taskHandle.id };
+  }
+
+  async processData(input: { dataUrl: string }, ctx: TaskContext) {
+    // Task implementation
+  }
+}
+```
+
+</TypeScriptExample>
+
+#### Parameters
+
+| Parameter | Type                | Description                                    |
+| --------- | ------------------- | ---------------------------------------------- |
+| `method`  | `string`            | Name of the method to execute as a task        |
+| `input`   | `any`               | Input data to pass to the task method          |
+| `options` | `TaskOptions`       | Optional configuration for the task            |
+
+#### TaskOptions
+
+| Option    | Type                | Description                                    |
+| --------- | ------------------- | ---------------------------------------------- |
+| `id`      | `string`            | Optional custom task ID (auto-generated if omitted) |
+| `timeout` | `string \| number`  | Task timeout ("30s", "5m", "2h" or milliseconds) |
+| `retries` | `number`            | Number of retry attempts on failure            |
+
+#### Returns
+
+A task handle object:
+
+| Property | Type         | Description                                    |
+| -------- | ------------ | ---------------------------------------------- |
+| `id`     | `string`     | Unique task identifier                         |
+| `status` | `TaskStatus` | Current task status                            |
+
+## TaskContext API
+
+The `TaskContext` object is provided to task methods and offers control over task execution:
+
+<TypeScriptExample>
+
+```ts
+async myTask(input: InputType, ctx: TaskContext): Promise<ResultType> {
+  // Emit progress events
+  ctx.emit("phase", { name: "initialization" });
+
+  // Update progress percentage
+  ctx.setProgress(25);
+
+  // Check for cancellation
+  if (ctx.signal.aborted) {
+    throw new Error("Task was cancelled");
+  }
+
+  // Access task ID
+  console.log("Task ID:", ctx.taskId);
+}
+```
+
+</TypeScriptExample>
+
+### Methods
+
+#### `ctx.emit(type, data)`
+
+Emit a custom event to connected clients.
+
+| Parameter | Type     | Description                                    |
+| --------- | -------- | ---------------------------------------------- |
+| `type`    | `string` | Event type identifier                          |
+| `data`    | `any`    | Event payload (must be JSON-serializable)      |
+
+<TypeScriptExample>
+
+```ts
+ctx.emit("phase", { name: "downloading", url: fileUrl });
+ctx.emit("warning", { message: "Rate limit reached" });
+ctx.emit("milestone", { completed: 5, total: 10 });
+```
+
+</TypeScriptExample>
+
+#### `ctx.setProgress(percentage)`
+
+Update the task progress percentage.
+
+| Parameter    | Type     | Description                                    |
+| ------------ | -------- | ---------------------------------------------- |
+| `percentage` | `number` | Progress value between 0 and 100               |
+
+<TypeScriptExample>
+
+```ts
+ctx.setProgress(0);   // Just started
+ctx.setProgress(50);  // Halfway done
+ctx.setProgress(100); // Complete
+```
+
+</TypeScriptExample>
+
+### Properties
+
+#### `ctx.signal`
+
+An `AbortSignal` that indicates whether the task has been cancelled.
+
+<TypeScriptExample>
+
+```ts
+// Check if aborted
+if (ctx.signal.aborted) {
+  throw new Error("Task cancelled");
+}
+
+// Listen for abort event
+ctx.signal.addEventListener("abort", () => {
+  console.log("Task is being cancelled");
+});
+```
+
+</TypeScriptExample>
+
+#### `ctx.taskId`
+
+The unique identifier for this task.
+
+<TypeScriptExample>
+
+```ts
+console.log("Running task:", ctx.taskId);
+```
+
+</TypeScriptExample>
+
+## Task management
+
+### Get a task
+
+Retrieve a task by ID:
+
+<TypeScriptExample>
+
+```ts
+const task = this.tasks.get(taskId);
+
+if (task) {
+  console.log("Status:", task.status);
+  console.log("Progress:", task.progress);
+  console.log("Result:", task.result);
+}
+```
+
+</TypeScriptExample>
+
+### List tasks
+
+Query tasks with optional filtering:
+
+<TypeScriptExample>
+
+```ts
+// Get all tasks
+const allTasks = this.tasks.list();
+
+// Filter by status
+const runningTasks = this.tasks.list({ status: "running" });
+const completedTasks = this.tasks.list({ status: "completed" });
+const failedTasks = this.tasks.list({ status: "failed" });
+```
+
+</TypeScriptExample>
+
+### Cancel a task
+
+Cancel a running task:
+
+<TypeScriptExample>
+
+```ts
+await this.tasks.cancel(taskId, "User requested cancellation");
+```
+
+</TypeScriptExample>
+
+| Parameter | Type     | Description                                    |
+| --------- | -------- | ---------------------------------------------- |
+| `taskId`  | `string` | ID of the task to cancel                       |
+| `reason`  | `string` | Optional reason for cancellation               |
+
+### Clean up tasks
+
+Remove old completed or failed tasks:
+
+<TypeScriptExample>
+
+```ts
+// Remove tasks older than 24 hours
+const maxAge = 24 * 60 * 60 * 1000;
+await this.tasks.cleanup(maxAge);
+```
+
+</TypeScriptExample>
+
+| Parameter | Type     | Description                                    |
+| --------- | -------- | ---------------------------------------------- |
+| `maxAge`  | `number` | Maximum age in milliseconds                    |
+
+## Task object
+
+Tasks are represented as objects with the following structure:
+
+| Property   | Type           | Description                                    |
+| ---------- | -------------- | ---------------------------------------------- |
+| `id`       | `string`       | Unique task identifier                         |
+| `status`   | `TaskStatus`   | Current task status                            |
+| `progress` | `number`       | Progress percentage (0-100)                    |
+| `result`   | `any`          | Task result (available when status is "completed") |
+| `error`    | `string`       | Error message (available when status is "failed") |
+| `events`   | `TaskEvent[]`  | Array of progress events emitted during execution |
+
+### TaskStatus
+
+Task status can be one of:
+
+- `"pending"` - Task created but not yet started
+- `"running"` - Task is currently executing
+- `"completed"` - Task finished successfully
+- `"failed"` - Task encountered an error
+- `"aborted"` - Task was cancelled
+
+### TaskEvent
+
+Events emitted during task execution:
+
+| Property    | Type     | Description                                    |
+| ----------- | -------- | ---------------------------------------------- |
+| `id`        | `string` | Unique event identifier                        |
+| `type`      | `string` | Event type (custom string)                     |
+| `data`      | `any`    | Event payload                                  |
+| `timestamp` | `number` | Unix timestamp when event was emitted          |
+
+## Client-side task tracking
+
+### useTask hook
+
+Track task progress in React applications:
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function TaskMonitor({ taskId }: { taskId: string }) {
+  const agent = useAgent({ agent: "my-agent" });
+  const task = useTask(agent, taskId, {
+    onEvent: (event) => {
+      console.log(`[${event.type}]`, event.data);
+    },
+    onComplete: (result) => {
+      console.log("Task completed:", result);
+    },
+    onError: (error) => {
+      console.error("Task failed:", error);
+    }
+  });
+
+  return (
+    <div>
+      <h2>Task: {taskId}</h2>
+      <p>Status: {task.status}</p>
+      <progress value={task.progress} max={100} />
+
+      {task.events.map((event) => (
+        <div key={event.id}>
+          {event.type}: {JSON.stringify(event.data)}
+        </div>
+      ))}
+
+      {task.isRunning && (
+        <button onClick={() => task.abort()}>Cancel</button>
+      )}
+
+      {task.isCompleted && <div>Result: {JSON.stringify(task.result)}</div>}
+      {task.isError && <div>Error: {task.error}</div>}
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+#### Parameters
+
+| Parameter  | Type            | Description                                    |
+| ---------- | --------------- | ---------------------------------------------- |
+| `agent`    | `AgentClient`   | Agent client instance                          |
+| `taskId`   | `string`        | ID of the task to track                        |
+| `options`  | `TaskOptions`   | Optional callbacks for task events             |
+
+#### TaskOptions
+
+| Option       | Type                        | Description                                    |
+| ------------ | --------------------------- | ---------------------------------------------- |
+| `onEvent`    | `(event: TaskEvent) => void` | Called when task emits an event               |
+| `onComplete` | `(result: any) => void`      | Called when task completes successfully       |
+| `onError`    | `(error: string) => void`    | Called when task fails                        |
+
+#### Returns
+
+A reactive task object:
+
+| Property      | Type           | Description                                    |
+| ------------- | -------------- | ---------------------------------------------- |
+| `id`          | `string`       | Task identifier                                |
+| `status`      | `TaskStatus`   | Current status                                 |
+| `progress`    | `number`       | Progress percentage (0-100)                    |
+| `result`      | `any`          | Task result (when completed)                   |
+| `error`       | `string`       | Error message (when failed)                    |
+| `events`      | `TaskEvent[]`  | Array of progress events                       |
+| `isRunning`   | `boolean`      | True if task is pending or running             |
+| `isCompleted` | `boolean`      | True if task completed successfully            |
+| `isError`     | `boolean`      | True if task failed                            |
+| `abort()`     | `() => void`   | Function to cancel the task                    |
+
+## Example: Repository analysis task
+
+Here is a complete example of a task that analyzes a GitHub repository:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, task, type TaskContext } from "agents";
+
+interface AnalysisInput {
+  repoUrl: string;
+  branch?: string;
+}
+
+interface AnalysisResult {
+  summary: string;
+  fileCount: number;
+  techStack: string[];
+}
+
+export class AnalyzerAgent extends Agent {
+  @task({ timeout: "5m" })
+  async analyzeRepo(
+    input: AnalysisInput,
+    ctx: TaskContext
+  ): Promise<AnalysisResult> {
+    const { repoUrl, branch = "main" } = input;
+
+    // Phase 1: Clone repository
+    ctx.emit("phase", { name: "cloning", repo: repoUrl });
+    ctx.setProgress(10);
+
+    const files = await this.fetchRepoFiles(repoUrl, branch);
+
+    // Check for cancellation
+    if (ctx.signal.aborted) {
+      throw new Error("Analysis cancelled by user");
+    }
+
+    // Phase 2: Analyze files
+    ctx.emit("phase", { name: "analyzing", fileCount: files.length });
+    ctx.setProgress(50);
+
+    const techStack = this.detectTechStack(files);
+
+    // Phase 3: Generate summary
+    ctx.emit("phase", { name: "summarizing" });
+    ctx.setProgress(90);
+
+    const summary = await this.generateSummary(files, techStack);
+
+    ctx.setProgress(100);
+
+    return {
+      summary,
+      fileCount: files.length,
+      techStack
+    };
+  }
+
+  private async fetchRepoFiles(url: string, branch: string) {
+    // Implementation
+  }
+
+  private detectTechStack(files: string[]) {
+    // Implementation
+  }
+
+  private async generateSummary(files: string[], techStack: string[]) {
+    // Implementation
+  }
+}
+```
+
+</TypeScriptExample>
