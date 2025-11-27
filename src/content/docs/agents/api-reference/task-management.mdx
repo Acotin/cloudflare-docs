@@ -1,0 +1,239 @@
+---
+title: Task management
+pcx_content_type: concept
+sidebar:
+  order: 12
+---
+
+import { TypeScriptExample } from "~/components";
+
+The Agents SDK includes a task management system for tracking and managing long-running operations with lifecycle tracking, progress updates, and cancellation support.
+
+Tasks are ideal for operations that take time - API calls, file processing, AI model runs, or any asynchronous work that needs progress tracking and the ability to be cancelled.
+
+## Task decorator
+
+Use the `@task()` decorator to mark methods that should run as tracked tasks. When called, these methods execute asynchronously with full lifecycle management.
+
+<TypeScriptExample>
+
+```ts
+import { Agent, task, type TaskContext } from "agents";
+
+export class MyAgent extends Agent {
+  @task({ timeout: "5m" })
+  async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
+    // Emit events for real-time updates
+    ctx.emit("phase", { name: "cloning" });
+    ctx.setProgress(10);
+
+    const repo = await this.cloneRepo(input.repoUrl);
+
+    // Check for cancellation between phases
+    if (ctx.signal.aborted) throw new Error("Cancelled");
+
+    ctx.emit("phase", { name: "analyzing" });
+    ctx.setProgress(50);
+
+    const results = await this.runAnalysis(repo);
+
+    ctx.setProgress(100);
+    return results; // Stored as task.result
+  }
+}
+```
+
+</TypeScriptExample>
+
+### Task decorator options
+
+The `@task()` decorator accepts an options object:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `timeout` | `string \| number` | Timeout duration as a string (`"30s"`, `"5m"`, `"2h"`) or milliseconds |
+| `retries` | `number` | Number of retry attempts on failure (non-durable, in-memory) |
+
+For durable retries that survive restarts, use [Cloudflare Workflows](/agents/api-reference/run-workflows/) which has built-in retry support via `step.do({ retries: {...} })`.
+
+## TaskContext API
+
+The `ctx` parameter provided to task methods includes:
+
+| Method | Description |
+|--------|-------------|
+| `ctx.emit(type, data)` | Send a progress event to connected clients |
+| `ctx.setProgress(0-100)` | Update completion percentage |
+| `ctx.signal` | AbortSignal - check `.aborted` or add event listener for cancellation |
+| `ctx.taskId` | The task's unique ID |
+
+## Starting tasks
+
+Tasks decorated with `@task()` can be called from client code or from other methods. The decorated method returns immediately with a task handle containing the task ID and status.
+
+<TypeScriptExample>
+
+```ts
+// From client code
+const handle = await agent.call("analyzeRepo", [{ repoUrl: "..." }]);
+console.log(handle.id); // task_xxx
+console.log(handle.status); // "pending"
+
+// From another Agent method
+const handle = await this.analyzeRepo({ repoUrl: "..." });
+```
+
+</TypeScriptExample>
+
+### Programmatic task creation
+
+You can also create tasks programmatically using `this.task()`:
+
+<TypeScriptExample>
+
+```ts
+export class MyAgent extends Agent {
+  @callable()
+  async startAnalysis(repoUrl: string) {
+    // Start a task manually
+    const task = await this.task(
+      "analyzeRepo",
+      { repoUrl },
+      {
+        timeout: "10m",
+        retries: 3
+      }
+    );
+
+    return { taskId: task.id, status: task.status };
+  }
+
+  // The actual work - runs asynchronously
+  async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
+    // Implementation
+  }
+}
+```
+
+</TypeScriptExample>
+
+## Task lifecycle
+
+Tasks automatically transition through states:
+
+```
+pending → running → completed
+                 ↘ failed
+                 ↘ aborted
+```
+
+Each state change persists to SQLite and broadcasts to connected clients for real-time updates.
+
+## Managing tasks
+
+The `this.tasks` accessor provides methods to manage tasks:
+
+<TypeScriptExample>
+
+```ts
+// Get a specific task
+const task = this.tasks.get(taskId);
+
+// List tasks by status
+const running = this.tasks.list({ status: "running" });
+const failed = this.tasks.list({ status: "failed" });
+
+// Cancel a running task
+await this.tasks.cancel(taskId, "User requested cancellation");
+
+// Delete a completed task
+this.tasks.delete(taskId);
+
+// Clean up old tasks (older than 24 hours)
+await this.tasks.cleanup(24 * 60 * 60 * 1000);
+```
+
+</TypeScriptExample>
+
+### Task filter options
+
+The `list()` method accepts filter options:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `status` | `TaskStatus \| TaskStatus[]` | Filter by one or more statuses |
+| `method` | `string` | Filter by method name |
+| `createdAfter` | `number` | Only tasks created after this timestamp |
+| `createdBefore` | `number` | Only tasks created before this timestamp |
+| `limit` | `number` | Limit number of results |
+
+## React integration
+
+Track task progress in real-time using the `useTask` hook:
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function TaskProgress({ taskId }: { taskId: string }) {
+  const agent = useAgent({ agent: "my-agent" });
+  const task = useTask(agent, taskId, {
+    onEvent: (event) => console.log("Event:", event),
+    onComplete: (result) => console.log("Done:", result),
+    onError: (error) => console.error("Failed:", error)
+  });
+
+  return (
+    <div>
+      <div>Status: {task.status}</div>
+      <progress value={task.progress} max={100} />
+
+      <div>
+        {task.events.map((e) => (
+          <div key={e.id}>
+            [{e.type}] {JSON.stringify(e.data)}
+          </div>
+        ))}
+      </div>
+
+      {task.isRunning && <button onClick={() => task.abort()}>Cancel</button>}
+
+      {task.isCompleted && <div>Result: {JSON.stringify(task.result)}</div>}
+      {task.isError && <div>Error: {task.error}</div>}
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+## Task data structure
+
+A task object contains the following properties:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `string` | Unique task identifier |
+| `method` | `string` | Method name being executed |
+| `input` | `unknown` | Input payload passed to the task |
+| `status` | `TaskStatus` | Current task status |
+| `result` | `unknown` | Task result (when completed) |
+| `error` | `string` | Error message (when failed) |
+| `events` | `TaskEvent[]` | Events emitted during execution |
+| `createdAt` | `number` | When the task was created |
+| `startedAt` | `number` | When execution started |
+| `completedAt` | `number` | When execution completed/failed/aborted |
+| `progress` | `number` | Progress percentage (0-100) |
+
+## When to use tasks vs. workflows
+
+| Feature | `@task()` | `workflow()` |
+|---------|----------|--------------|
+| Duration | Seconds to minutes | Minutes to days |
+| Execution | In Durable Object | Separate Workflow engine |
+| Durability | Lost on DO eviction | Survives restarts |
+| Retries | Manual | Automatic per-step |
+| Sleep | Not durable | Durable (can wait hours) |
+
+Use `@task()` for quick operations under 30 seconds. For longer-running, durable operations, use [workflows](/agents/api-reference/run-workflows/).

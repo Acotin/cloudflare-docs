@@ -278,3 +278,144 @@ You can also call a Workflow that is defined in a different Workers script from 
 </WranglerConfig>
 
 Refer to the [cross-script calls](/workflows/build/workers-api/#cross-script-calls) section of the Workflows documentation for more examples.
+
+## Workflows with task tracking
+
+The Agents SDK provides `this.workflow()` to dispatch Workflows that integrate with the [task management system](/agents/api-reference/task-management/). This provides a unified client API where both `@task()` decorated methods and Workflow-based operations use the same interface.
+
+<TypeScriptExample>
+
+```ts
+import { Agent, callable } from "agents";
+
+export class MyAgent extends Agent<Env> {
+  @callable()
+  async startAnalysis(input: { repoUrl: string }) {
+    // Dispatch a workflow with automatic task tracking
+    return this.workflow("ANALYSIS_WORKFLOW", input);
+  }
+}
+```
+
+</TypeScriptExample>
+
+The `this.workflow()` method:
+- Creates a task entry automatically
+- Dispatches the Workflow with task metadata
+- Returns a task handle immediately with the task ID and status
+- Updates task state when the Workflow completes or fails
+
+### AgentWorkflow base class
+
+To integrate your Workflow with the task system, extend `AgentWorkflow` instead of `WorkflowEntrypoint`. This provides a familiar `ctx.emit()` and `ctx.setProgress()` API that syncs updates back to the Agent.
+
+<TypeScriptExample>
+
+```ts
+import { AgentWorkflow, type WorkflowTaskContext } from "agents";
+
+interface Env {
+  OPENAI_API_KEY: string;
+}
+
+interface Params {
+  repoUrl: string;
+  branch: string;
+}
+
+export class AnalysisWorkflow extends AgentWorkflow<Env, Params> {
+  async run(ctx: WorkflowTaskContext<Params>) {
+    // Durable step - persisted, auto-retry on failure
+    const files = await ctx.step("fetch-repo", async () => {
+      ctx.emit("phase", { name: "fetching" });
+      ctx.setProgress(20);
+      return await fetchFiles(ctx.params.repoUrl, ctx.params.branch);
+    });
+
+    // Durable sleep - can wait for hours
+    await ctx.sleep("rate-limit", "1h");
+
+    // Another durable step
+    const analysis = await ctx.step("analyze", async () => {
+      ctx.emit("phase", { name: "analyzing" });
+      ctx.setProgress(80);
+      return await analyzeFiles(files);
+    });
+
+    ctx.setProgress(100);
+    return analysis;
+  }
+}
+```
+
+</TypeScriptExample>
+
+### WorkflowTaskContext API
+
+The context provided to `AgentWorkflow.run()` includes:
+
+| Property/Method | Type | Description |
+|-----------------|------|-------------|
+| `ctx.params` | `TParams` | Workflow input parameters |
+| `ctx.taskId` | `string` | Task ID for tracking |
+| `ctx.step(name, fn)` | `<T>(name: string, fn: () => Promise<T>) => Promise<T>` | Execute a durable step with automatic retry |
+| `ctx.sleep(name, duration)` | `(name: string, duration: string) => Promise<void>` | Durable sleep that survives restarts |
+| `ctx.emit(type, data)` | `(type: string, data?: unknown) => void` | Emit progress event to Agent and clients |
+| `ctx.setProgress(progress)` | `(progress: number) => void` | Set progress percentage (0-100) |
+
+### Configuration
+
+Configure both your Agent and Workflow in your `wrangler.jsonc`:
+
+<WranglerConfig>
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      { "name": "MyAgent", "class_name": "MyAgent" }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "ANALYSIS_WORKFLOW",
+      "binding": "ANALYSIS_WORKFLOW",
+      "class_name": "AnalysisWorkflow"
+    }
+  ]
+}
+```
+
+</WranglerConfig>
+
+### Client-side usage
+
+From the client perspective, Workflows dispatched via `this.workflow()` use the same API as `@task()` decorated methods:
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function AnalysisProgress({ taskId }: { taskId: string }) {
+  const agent = useAgent({ agent: "my-agent" });
+  const task = useTask(agent, taskId);
+
+  return (
+    <div>
+      <div>Status: {task.status}</div>
+      <progress value={task.progress} max={100} />
+
+      {task.events.map((e) => (
+        <div key={e.id}>[{e.type}] {JSON.stringify(e.data)}</div>
+      ))}
+
+      {task.isRunning && <button onClick={() => task.abort()}>Cancel</button>}
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+This unified API means your client code does not need to know whether a task is running in the Agent or in a Workflow - both provide the same real-time updates and cancellation support.
