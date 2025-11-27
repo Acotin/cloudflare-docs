@@ -500,6 +500,333 @@ export class YourAgent extends Agent {
 
 </TypeScriptExample>
 
+### Task Management API
+
+The Task Management API provides lifecycle tracking for long-running operations in your Agent. Tasks automatically handle progress updates, event streaming, cancellation, and persistence - making them ideal for operations like API calls, file processing, or AI agent runs that need real-time status updates.
+
+#### Creating tasks
+
+Tasks are created using the `@task()` decorator or the `this.task()` method. The decorator provides a cleaner API, while the method offers more flexibility.
+
+```ts
+import { Agent, task, type TaskContext } from "agents";
+
+interface Env {
+	// Your environment bindings
+}
+
+export class YourAgent extends Agent<Env> {
+  // Option 1: Using the @task() decorator (recommended)
+  @task({ timeout: "5m" })
+  async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
+    // Emit events for real-time updates
+    ctx.emit("phase", { name: "cloning" });
+    ctx.setProgress(10);
+
+    const repo = await this.cloneRepo(input.repoUrl);
+
+    // Check for cancellation between phases
+    if (ctx.signal.aborted) throw new Error("Cancelled");
+
+    ctx.emit("phase", { name: "analyzing" });
+    ctx.setProgress(50);
+
+    const results = await this.runAnalysis(repo);
+
+    ctx.setProgress(100);
+    return results; // Stored as task.result
+  }
+
+  // Option 2: Using this.task() method directly
+  async startCustomTask(input: unknown) {
+    const taskHandle = await this.task(
+      "customMethod",
+      input,
+      {
+        timeout: "10m",
+        retries: 3
+      }
+    );
+
+    return { taskId: taskHandle.id, status: taskHandle.status };
+  }
+
+  // The method that will be executed as a task
+  async customMethod(input: unknown, ctx: TaskContext) {
+    // Your task logic here
+    return { result: "done" };
+  }
+}
+```
+
+#### Task lifecycle
+
+Tasks automatically transition through states:
+
+```
+pending → running → completed
+                 ↘ failed
+                 ↘ aborted
+```
+
+Each state change persists to SQLite and broadcasts to connected clients in real-time.
+
+#### TaskContext API
+
+The `TaskContext` parameter in task methods provides methods for progress tracking and cancellation:
+
+```ts
+interface TaskContext {
+  // Unique task identifier
+  taskId: string;
+
+  // AbortSignal for cancellation detection
+  signal: AbortSignal;
+
+  // Emit a custom event to all connected clients
+  emit(type: string, data?: unknown): void;
+
+  // Update task progress percentage (0-100)
+  setProgress(progress: number): void;
+}
+```
+
+<TypeScriptExample>
+
+```ts
+export class YourAgent extends Agent {
+  @task({ timeout: "5m" })
+  async processFile(input: { fileUrl: string }, ctx: TaskContext) {
+    // Emit custom events
+    ctx.emit("download_started", { url: input.fileUrl });
+    ctx.setProgress(10);
+
+    const file = await this.downloadFile(input.fileUrl);
+
+    // Check for cancellation
+    if (ctx.signal.aborted) {
+      throw new Error("Task was cancelled");
+    }
+
+    ctx.emit("processing", { size: file.size });
+    ctx.setProgress(50);
+
+    const result = await this.processData(file);
+
+    ctx.setProgress(100);
+    return result;
+  }
+}
+```
+
+</TypeScriptExample>
+
+#### Managing tasks
+
+Access and manage tasks using the `this.tasks` property:
+
+```ts
+class Agent<Env, State = unknown> {
+  tasks: {
+    // Get a specific task by ID
+    get(taskId: string): Task | undefined;
+
+    // List tasks by status
+    list(options?: { status?: TaskStatus }): Task[];
+
+    // Cancel a running task
+    cancel(taskId: string, reason?: string): Promise<void>;
+
+    // Clean up old completed tasks
+    cleanup(olderThanMs: number): Promise<number>;
+  };
+}
+```
+
+<TypeScriptExample>
+
+```ts
+export class YourAgent extends Agent {
+  async getTaskStatus(taskId: string) {
+    const task = this.tasks.get(taskId);
+
+    if (!task) {
+      return { error: "Task not found" };
+    }
+
+    return {
+      id: task.id,
+      status: task.status,
+      progress: task.progress,
+      events: task.events,
+      result: task.result,
+      error: task.error
+    };
+  }
+
+  async listActiveTasks() {
+    const running = this.tasks.list({ status: "running" });
+    const pending = this.tasks.list({ status: "pending" });
+
+    return { running, pending };
+  }
+
+  async cancelTask(taskId: string) {
+    await this.tasks.cancel(taskId, "User requested cancellation");
+    return { success: true };
+  }
+
+  async cleanupOldTasks() {
+    // Remove tasks older than 24 hours
+    const removed = await this.tasks.cleanup(24 * 60 * 60 * 1000);
+    return { removed };
+  }
+}
+```
+
+</TypeScriptExample>
+
+#### Task options
+
+Configure task behavior with options:
+
+```ts
+interface TaskOptions {
+  // Timeout duration as string or milliseconds
+  timeout?: string | number; // Examples: "30s", "5m", "2h", or 300000
+
+  // Number of retry attempts on failure
+  retries?: number;
+
+  // Custom task ID (defaults to auto-generated)
+  id?: string;
+}
+```
+
+#### Task type definition
+
+The `Task` interface represents a tracked task:
+
+```ts
+interface Task<TResult = unknown> {
+  // Unique task identifier
+  id: string;
+
+  // Method name being executed
+  method: string;
+
+  // Input payload passed to the task
+  input: unknown;
+
+  // Current task status
+  status: TaskStatus;
+
+  // Task result (available when status is "completed")
+  result?: TResult;
+
+  // Error message (available when status is "failed")
+  error?: string;
+
+  // Events emitted during execution
+  events: TaskEvent[];
+
+  // Timestamps
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+
+  // Progress percentage (0-100)
+  progress?: number;
+
+  // Timeout in milliseconds
+  timeoutMs?: number;
+}
+
+type TaskStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+
+interface TaskEvent {
+  id: string;
+  type: string;
+  data?: unknown;
+  timestamp: number;
+}
+```
+
+#### React integration
+
+Track task progress in real-time from React components using the `useTask` hook:
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function TaskProgress({ taskId }: { taskId: string }) {
+  const agent = useAgent({ agent: "my-agent" });
+  const task = useTask(agent, taskId, {
+    onEvent: (event) => console.log("Event:", event),
+    onComplete: (result) => console.log("Done:", result),
+    onError: (error) => console.error("Failed:", error)
+  });
+
+  if (!task) return <div>Loading task...</div>;
+
+  return (
+    <div>
+      <div>Status: {task.status}</div>
+      <progress value={task.progress} max={100} />
+
+      <div>
+        {task.events.map((e) => (
+          <div key={e.id}>
+            [{e.type}] {JSON.stringify(e.data)}
+          </div>
+        ))}
+      </div>
+
+      {task.status === "running" && (
+        <button onClick={() => task.abort()}>Cancel</button>
+      )}
+
+      {task.status === "completed" && (
+        <div>Result: {JSON.stringify(task.result)}</div>
+      )}
+
+      {task.status === "failed" && <div>Error: {task.error}</div>}
+    </div>
+  );
+}
+```
+
+#### Integrating tasks with workflows
+
+Tasks can also trigger [Cloudflare Workflows](/workflows/) for durable, long-running operations. This pattern combines the client API simplicity of tasks with the durability and automatic retry capabilities of workflows:
+
+```ts
+import { Agent, callable } from "agents";
+
+interface Env {
+  ANALYSIS_WORKFLOW: Workflow;
+}
+
+export class YourAgent extends Agent<Env> {
+  // Use @callable() for workflows (not @task())
+  @callable()
+  async deepAnalysis(input: { repoUrl: string }) {
+    // this.workflow() returns a task handle automatically
+    return this.workflow("ANALYSIS_WORKFLOW", input);
+  }
+}
+```
+
+The client uses the same API regardless of whether the task runs in the Agent or in a Workflow:
+
+```tsx
+// Works for both @task() and workflow() methods
+const task = await agent.call("deepAnalysis", [{ repoUrl: "..." }]);
+console.log(task.id, task.status); // Real-time updates work the same way
+```
+
+Refer to [Run Workflows](/agents/api-reference/run-workflows/) for more details on integrating Agents with Workflows.
+
 ### SQL API
 
 Each Agent instance has an embedded SQLite database that can be accessed using the `this.sql` method within any method on your `Agent` class.

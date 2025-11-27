@@ -16,9 +16,181 @@ Because an Agent is just like a Worker script, it can create Workflows defined i
 
 Agents and Workflows have some similarities: they can both run tasks asynchronously. For straightforward tasks that are linear or need to run to completion, a Workflow can be ideal: steps can be retried, they can be cancelled, and can act on events.
 
-Agents do not have to run to completion: they can loop, branch and run forever, and they can also interact directly with users (over HTTP or WebSockets). An Agent can be used to trigger multiple Workflows as it runs, and can thus be used to co-ordinate and manage Workflows to achieve its goals.
+Agents do not have to run to completion: they can loop, branch and run forever, and they can also interact directly with users (over HTTP or WebSockets). An Agent can be used to trigger multiple Workflows as it runs, and can thus be used to coordinate and manage Workflows to achieve its goals.
 
 :::
+
+## Tasks and Workflows
+
+The Agents SDK provides a unified task system that works seamlessly with both in-Agent execution and Cloudflare Workflows. This allows you to use the same client API regardless of whether a task runs directly in your Agent (for quick operations) or in a durable Workflow (for long-running operations).
+
+### When to use each approach
+
+| Feature | @task() (Agent) | workflow() (Workflows) |
+| ------- | --------------- | ---------------------- |
+| Duration | Seconds to minutes | Minutes to days |
+| Execution | In Durable Object | Separate Workflow engine |
+| Durability | Lost on DO eviction | Survives restarts |
+| Retries | Manual | Automatic per-step |
+| Sleep | Not durable | Durable (can wait hours) |
+| Cost | DO compute time | Workflow compute time |
+
+### Using the task decorator
+
+For quick operations that run in your Agent, use the `@task()` decorator:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, task, type TaskContext } from "agents";
+
+interface Env {
+	// Your environment bindings
+}
+
+export class MyAgent extends Agent<Env> {
+  @task({ timeout: "5m" })
+  async quickAnalysis(input: { repoUrl: string }, ctx: TaskContext) {
+    ctx.emit("phase", { name: "fetching" });
+    ctx.setProgress(10);
+
+    const files = await this.fetchRepo(input.repoUrl);
+
+    ctx.emit("phase", { name: "analyzing" });
+    ctx.setProgress(50);
+
+    const result = await this.analyze(files);
+
+    ctx.setProgress(100);
+    return result;
+  }
+}
+```
+
+</TypeScriptExample>
+
+### Integrating tasks with workflows
+
+For durable, long-running operations, trigger a Workflow using the `this.workflow()` method. The Agents SDK automatically wraps the Workflow in a task interface, providing the same client API as `@task()` methods:
+
+<TypeScriptExample>
+
+```ts
+import { Agent, callable } from "agents";
+
+interface Env {
+  ANALYSIS_WORKFLOW: Workflow;
+}
+
+export class MyAgent extends Agent<Env> {
+  // Use @callable() decorator (not @task()) for workflow methods
+  @callable()
+  async deepAnalysis(input: { repoUrl: string }) {
+    // this.workflow() returns a task handle automatically
+    return this.workflow("ANALYSIS_WORKFLOW", input);
+  }
+}
+
+// Define your Workflow
+export class AnalysisWorkflow extends WorkflowEntrypoint<Env, { repoUrl: string }> {
+  async run(event: WorkflowEvent<{ repoUrl: string }>, step: WorkflowStep) {
+    // Durable step - persisted, auto-retry on failure
+    const files = await step.do("fetch-repo", async () => {
+      return await this.fetchRepo(event.payload.repoUrl);
+    });
+
+    // Durable sleep - can wait for hours
+    await step.sleep("rate-limit", "1 hour");
+
+    // Another durable step
+    const analysis = await step.do("analyze", async () => {
+      return await this.analyzeFiles(files);
+    });
+
+    return analysis;
+  }
+}
+```
+
+</TypeScriptExample>
+
+The client uses the same API regardless of whether the task runs in the Agent or in a Workflow:
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function TaskRunner() {
+  const agent = useAgent({ agent: "my-agent" });
+
+  async function startQuick() {
+    // Calls @task() method - runs in Agent
+    const task = await agent.call("quickAnalysis", [{ repoUrl: "..." }]);
+    console.log(task.id, task.status);
+  }
+
+  async function startDeep() {
+    // Calls workflow() method - runs in Workflow
+    const task = await agent.call("deepAnalysis", [{ repoUrl: "..." }]);
+    console.log(task.id, task.status); // Same API!
+  }
+
+  return (
+    <div>
+      <button onClick={startQuick}>Quick Analysis</button>
+      <button onClick={startDeep}>Deep Analysis (Workflow)</button>
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+### Workflow progress updates
+
+Workflows can send progress updates back to the Agent, which automatically broadcasts them to connected clients:
+
+<TypeScriptExample>
+
+```ts
+export class AnalysisWorkflow extends WorkflowEntrypoint<Env, Params> {
+  async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
+    // Send progress update to the Agent
+    await this.notifyAgent(event.payload.agentId, {
+      progress: 25,
+      event: { type: "phase", data: { name: "fetching" } }
+    });
+
+    const files = await step.do("fetch", async () => {
+      return await this.fetchFiles(event.payload.repoUrl);
+    });
+
+    await this.notifyAgent(event.payload.agentId, {
+      progress: 75,
+      event: { type: "phase", data: { name: "analyzing" } }
+    });
+
+    const result = await step.do("analyze", async () => {
+      return await this.analyzeFiles(files);
+    });
+
+    return result;
+  }
+
+  private async notifyAgent(agentId: string, update: { progress: number; event: object }) {
+    await fetch(`https://your-agent.workers.dev/task-update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, ...update })
+    });
+  }
+}
+```
+
+</TypeScriptExample>
+
+Refer to the [Task Management API](/agents/api-reference/agents-api/#task-management-api) for complete details on creating and managing tasks.
 
 ## Trigger a Workflow
 
