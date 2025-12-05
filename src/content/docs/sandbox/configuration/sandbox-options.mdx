@@ -108,6 +108,44 @@ const sandbox2 = getSandbox(env.Sandbox, 'user-env', {
 
 Precedence: `options` > `env vars` > SDK defaults
 
+### transportMode
+
+**Type**: `"http" | "websocket"`
+**Default**: `"http"`
+
+Choose the transport protocol for communication between the Durable Object and container. WebSocket mode multiplexes all requests over a single connection, reducing sub-request count.
+
+**HTTP mode** (default):
+- Each SDK method call creates a separate HTTP request
+- Simple and works everywhere
+- Counts toward sub-request limits in Workers/Durable Objects
+
+**WebSocket mode**:
+- All SDK calls multiplex over one WebSocket connection
+- Reduces sub-request count - useful when hitting Worker sub-request limits
+- Requires `wsUrl` option to be set
+
+<TypeScriptExample>
+```ts
+// HTTP mode (default) - each call is a separate HTTP request
+const sandbox1 = getSandbox(env.Sandbox, 'user-123');
+await sandbox1.exec('echo hello');  // HTTP request
+await sandbox1.readFile('/file.txt');  // Another HTTP request
+
+// WebSocket mode - all calls share one connection
+const sandbox2 = getSandbox(env.Sandbox, 'user-456', {
+  transportMode: 'websocket',
+  wsUrl: 'ws://localhost:3000/ws'  // Container WebSocket endpoint
+});
+await sandbox2.exec('echo hello');  // WS message
+await sandbox2.readFile('/file.txt');  // Same WS connection
+```
+</TypeScriptExample>
+
+:::note[When to use WebSocket mode]
+Use WebSocket transport when making many SDK calls in quick succession and approaching Worker sub-request limits. The persistent connection eliminates the overhead of creating new HTTP requests for each operation.
+:::
+
 ### Logging
 
 **Type**: Environment variables
@@ -197,6 +235,17 @@ Use `keepAlive: true` for:
 - **Interactive sessions** - User-driven workflows where the container should remain available
 
 With `keepAlive`, containers never sleep automatically - use for scenarios where you control the lifecycle explicitly.
+
+## When to use transportMode
+
+Use `transportMode: 'websocket'` when:
+
+- **High-frequency SDK calls** - Making many sandbox operations in quick succession
+- **Sub-request limits** - Approaching Worker sub-request limits (1000 per request in free tier)
+- **Batch operations** - Performing multiple file operations, commands, or process management tasks
+- **Performance optimization** - Reducing latency by reusing a persistent connection
+
+The default HTTP mode works well for most applications. Switch to WebSocket mode if you are hitting sub-request limits or need to optimize for high-frequency operations.
 
 ## Related resources
 
