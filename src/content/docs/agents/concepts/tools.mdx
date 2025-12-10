@@ -27,6 +27,17 @@ Each tool has a defined interface specifying its inputs, outputs, and expected b
 
 The most common type of tools are those that wrap external APIs. These tools handle the complexity of API authentication, request formatting, and response parsing, presenting a clean interface to the AI system.
 
+#### Client-defined tools
+
+Client-defined tools are tools that execute on the client side rather than the server. This pattern is useful for:
+
+- Browser-specific actions (alerts, DOM manipulation, clipboard access)
+- Personalized tool sets for different users or clients
+- Embeddable widgets that need context from the embedding page
+- Security-sensitive operations that should remain client-side
+
+When using the Agents SDK, tools with an `execute` function in the client application are automatically sent to the server as schemas and executed on the client when the AI model calls them. See the [client-defined tools guide](/agents/guides/client-defined-tools/) for implementation details.
+
 #### Model Context Protocol (MCP)
 
 The [Model Context Protocol](https://modelcontextprotocol.io/introduction) provides a standardized way to define and interact with tools. Think of it as an abstraction on top of APIs designed for LLMs to interact with external resources. MCP defines a consistent interface for:
