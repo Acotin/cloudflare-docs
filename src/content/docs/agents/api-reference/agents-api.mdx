@@ -821,14 +821,48 @@ class AIChatAgent<Env = unknown, State = unknown> extends Agent<Env, State> {
 
 	// Handle incoming chat messages and generate a response
 	// onFinish is called when the response is complete
+	// options includes abortSignal and clientTools for dynamic tool registration
 	async onChatMessage(
 		onFinish: StreamTextOnFinishCallback<ToolSet>,
+		options?: OnChatMessageOptions
 	): Promise<Response | undefined>;
 
 	// Persist messages within the Agent's local storage.
 	async saveMessages(messages: Message[]): Promise<void>;
 }
+
+// Options passed to onChatMessage handler
+type OnChatMessageOptions = {
+	// AbortSignal for cancelling the request
+	abortSignal?: AbortSignal;
+	// Tool schemas sent from the client for dynamic tool registration
+	clientTools?: ClientToolSchema[];
+};
+
+// Schema for a client-defined tool sent from the browser
+type ClientToolSchema = {
+	// Unique name for the tool
+	name: string;
+	// Human-readable description of what the tool does
+	description?: string;
+	// JSON Schema defining the tool's input parameters
+	parameters?: Record<string, unknown>;
+};
 ```
+
+#### createToolsFromClientSchemas
+
+Converts client tool schemas to AI SDK tool format for use in your Agent's tools configuration.
+
+```ts
+import { createToolsFromClientSchemas } from "agents/ai-chat-agent";
+
+function createToolsFromClientSchemas(
+	clientTools?: ClientToolSchema[]
+): ToolSet;
+```
+
+These tools have no `execute` function. When the AI model calls them, the tool call is sent back to the client for execution.
 
 <TypeScriptExample>
 
@@ -947,9 +981,59 @@ type UseAgentChatOptions = Omit<
 	Parameters<typeof useChat>[0] & {
 		// Agent connection from useAgent
 		agent: ReturnType<typeof useAgent>;
+		// Tools that can be executed on the client
+		tools?: Record<string, AITool<unknown, unknown>>;
+		// Tools requiring confirmation (manual override)
+		toolsRequiringConfirmation?: string[];
+		// Enable automatic tool resolution
+		experimental_automaticToolResolution?: boolean;
+		// Auto-send after all confirmations are resolved
+		autoSendAfterAllConfirmationsResolved?: boolean;
+		// Enable stream resumption (default: true)
+		resume?: boolean;
+		// Customize request before sending messages
+		prepareSendMessagesRequest?: (
+			options: PrepareSendMessagesRequestOptions
+		) => PrepareSendMessagesRequestResult | Promise<PrepareSendMessagesRequestResult>;
 	},
 	"fetch"
 >;
+
+// Tool definition with client-side execution
+type AITool<Input = unknown, Output = unknown> = {
+	// Human-readable description of what the tool does
+	description?: string;
+	// JSON Schema defining the tool's input parameters
+	parameters?: JSONSchemaType;
+	// Function to execute the tool on the client
+	execute?: (input: Input) => Output | Promise<Output>;
+};
+
+// Options for prepareSendMessagesRequest callback
+type PrepareSendMessagesRequestOptions = {
+	// The chat ID
+	id: string;
+	// Messages to send
+	messages: Message[];
+	// What triggered this request
+	trigger: "submit-message" | "regenerate-message";
+	// ID of the message being sent
+	messageId?: string;
+	// Request metadata
+	requestMetadata?: unknown;
+};
+
+// Return type for prepareSendMessagesRequest callback
+type PrepareSendMessagesRequestResult = {
+	// Custom headers to send with the request
+	headers?: HeadersInit;
+	// Custom body data to merge with the request
+	body?: Record<string, unknown>;
+	// Custom credentials option
+	credentials?: RequestCredentials;
+	// Custom API endpoint
+	api?: string;
+};
 
 // React hook for building AI chat interfaces using an Agent
 function useAgentChat(options: UseAgentChatOptions): {

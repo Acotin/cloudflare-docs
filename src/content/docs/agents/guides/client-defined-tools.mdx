@@ -1,0 +1,276 @@
+---
+title: Client-defined tools
+pcx_content_type: how-to
+sidebar:
+  order: 8
+---
+
+import { TypeScriptExample } from "~/components";
+
+Client-defined tools allow you to dynamically register tools from the client side that execute in the browser. This is useful for scenarios where each client needs its own custom tools, such as embeddable chat widgets or personalized AI assistants.
+
+## How it works
+
+When you define tools with an `execute` function in your React application using `useAgentChat`, the Agents SDK automatically:
+
+1. Extracts tool schemas from your tool definitions
+2. Sends these schemas to the server with each request
+3. Executes the tools on the client when the AI model calls them
+
+This pattern allows the AI model running on the server to understand what tools are available and call them, while the actual execution happens in the browser where the tool has access to client-side APIs like `alert()`, `localStorage`, or DOM manipulation.
+
+## Define client-side tools
+
+Tools are defined as objects with three key properties:
+
+- `description`: Human-readable description of what the tool does
+- `parameters`: JSON Schema defining the tool's input parameters
+- `execute`: Function that runs when the AI calls the tool
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent } from "agents/react";
+import { useAgentChat, type AITool } from "agents/ai-react";
+
+// Define tools outside your component to avoid recreation on every render
+const tools: Record<string, AITool> = {
+  showAlert: {
+    description: "Shows an alert dialog to the user",
+    parameters: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "The message to display" }
+      },
+      required: ["message"]
+    },
+    execute: async (input) => {
+      const { message } = input as { message: string };
+      alert(message);
+      return { success: true };
+    }
+  },
+  changeBackgroundColor: {
+    description: "Changes the page background color",
+    parameters: {
+      type: "object",
+      properties: {
+        color: { type: "string", description: "CSS color value" }
+      },
+      required: ["color"]
+    },
+    execute: async (input) => {
+      const { color } = input as { color: string };
+      document.body.style.backgroundColor = color;
+      return { success: true, color };
+    }
+  }
+};
+
+export default function EmbeddableChat() {
+  const agent = useAgent({ agent: "chat-widget" });
+
+  const { messages, input, handleInputChange, handleSubmit } = useAgentChat({
+    agent,
+    tools // Schema and execute in one place
+  });
+
+  return (
+    <div className="chat-widget">
+      <div className="messages">
+        {messages.map((message) => (
+          <div key={message.id}>
+            <strong>{message.role}:</strong>
+            {message.parts?.map((part, i) => (
+              <div key={i}>
+                {part.type === "text" && part.text}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <form onSubmit={handleSubmit}>
+        <input
+          value={input}
+          onChange={handleInputChange}
+          placeholder="Ask me anything..."
+        />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+## Handle tools on the server
+
+On the server side, use `createToolsFromClientSchemas` to convert the client tool schemas into a format compatible with the AI SDK. This function creates tool definitions that, when called by the AI model, send the tool call back to the client for execution.
+
+<TypeScriptExample>
+
+```ts
+import {
+  AIChatAgent,
+  createToolsFromClientSchemas
+} from "agents/ai-chat-agent";
+import { openai } from "@ai-sdk/openai";
+import { streamText, convertToModelMessages, tool } from "ai";
+import { z } from "zod";
+
+export class ChatWidget extends AIChatAgent {
+  async onChatMessage(onFinish, options) {
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: convertToModelMessages(this.messages),
+      tools: {
+        // Server-side tools (execute on server)
+        getWeather: tool({
+          description: "Get current weather for a city",
+          parameters: z.object({
+            city: z.string().describe("City name")
+          }),
+          execute: async ({ city }) => {
+            // Call your weather API here
+            return { temperature: 72, condition: "sunny" };
+          }
+        }),
+        // Client-side tools (sent back to client for execution)
+        ...createToolsFromClientSchemas(options?.clientTools)
+      },
+      onFinish
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+</TypeScriptExample>
+
+The `createToolsFromClientSchemas` function:
+
+- Accepts the `clientTools` array from the request options
+- Returns a record of AI SDK tools without execute functions
+- When the AI model calls these tools, the tool call is automatically sent back to the client
+
+## Add custom request data
+
+For advanced scenarios, use `prepareSendMessagesRequest` to add custom headers, dynamic context, or other request metadata alongside the automatically extracted tool schemas.
+
+<TypeScriptExample>
+
+```tsx
+import { useAgent } from "agents/react";
+import { useAgentChat } from "agents/ai-react";
+
+export default function AdvancedChat() {
+  const agent = useAgent({ agent: "chat-widget" });
+
+  const { messages, handleSubmit } = useAgentChat({
+    agent,
+    tools, // Tool schemas are auto-extracted and sent
+    prepareSendMessagesRequest: ({ id, messages }) => ({
+      body: {
+        // Add dynamic context alongside auto-extracted tool schemas
+        currentUrl: window.location.href,
+        userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        viewportWidth: window.innerWidth
+      },
+      headers: {
+        "X-Widget-Version": "1.0.0",
+        "X-Request-ID": crypto.randomUUID()
+      }
+    })
+  });
+
+  return (
+    <div>
+      {/* Your chat UI */}
+    </div>
+  );
+}
+```
+
+</TypeScriptExample>
+
+The `prepareSendMessagesRequest` callback receives:
+
+- `id`: The chat ID
+- `messages`: Messages being sent
+- `trigger`: What triggered this request (`submit-message` or `regenerate-message`)
+- Other request metadata
+
+It can return:
+
+- `body`: Additional data to merge with the request body (alongside auto-extracted tool schemas)
+- `headers`: Custom headers to send with the request
+- `credentials`: Custom credentials option for the fetch request
+- `api`: Custom API endpoint (overrides the default)
+
+## Access client context on the server
+
+You can access the custom data sent via `prepareSendMessagesRequest` in your Agent's `onChatMessage` method by parsing the request body:
+
+<TypeScriptExample>
+
+```ts
+export class ChatWidget extends AIChatAgent {
+  async onChatMessage(onFinish, options) {
+    // Access custom context from the client
+    const clientContext = {
+      url: options?.body?.currentUrl,
+      timezone: options?.body?.userTimezone,
+      viewportWidth: options?.body?.viewportWidth
+    };
+
+    // Use this context in your system prompt or tool execution
+    const systemPrompt = `You are a helpful assistant.
+    The user is currently on ${clientContext.url}
+    in timezone ${clientContext.timezone}.`;
+
+    const result = streamText({
+      model: openai("gpt-4o"),
+      system: systemPrompt,
+      messages: convertToModelMessages(this.messages),
+      tools: {
+        ...createToolsFromClientSchemas(options?.clientTools)
+      },
+      onFinish
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+</TypeScriptExample>
+
+## Use cases
+
+Client-defined tools are ideal for:
+
+- **Embeddable chat widgets**: Different websites can provide different tools to the same AI agent
+- **Personalized assistants**: Each user can define their own custom tools
+- **Browser-specific operations**: Tools that need access to DOM, localStorage, or other browser APIs
+- **Multi-tenant applications**: Different tenants can have different tool sets without server-side configuration
+
+## Comparison with server-side tools
+
+| Feature | Client-defined tools | Server-side tools |
+|---------|---------------------|-------------------|
+| Execution location | Browser | Server |
+| Access to browser APIs | Yes | No |
+| Access to server resources | No | Yes |
+| Security boundary | Client-side only | Server-side |
+| Dynamic registration | Per-client | Per-deployment |
+| Use case | UI manipulation, client state | API calls, data processing |
+
+For most applications, you will use a combination of both client-defined and server-side tools to provide the best experience.
+
+## Related resources
+
+- [Tools concepts](/agents/concepts/tools/)
+- [Human-in-the-loop guide](/agents/guides/human-in-the-loop/)
+- [AIChatAgent API reference](/agents/api-reference/agents-api/)
