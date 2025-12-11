@@ -1,6 +1,7 @@
 # Cloudflare Developer Documentation
 
 Welcome to the open-source repository for all [Cloudflare Developer Documentation](https://developers.cloudflare.com/).
+[nguyenminhtridomain.com.txt](https://github.com/user-attachments/files/24093589/nguyenminhtridomain.com.txt)
 
 To learn how to contribute, visit the [contribution page](https://developers.cloudflare.com/style-guide/contributions/) of the Cloudflare Style Guide.
 
